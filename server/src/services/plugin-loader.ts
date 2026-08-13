@@ -2234,8 +2234,12 @@ export function pluginLoader(
       // Repo-local plugin installs can resolve workspace TS sources at runtime
       // (for example @paperclipai/shared exports). Run those workers through
       // the tsx loader so first-party example plugins work in development.
+      // `--import` takes an ESM specifier, not a filesystem path: on Windows a
+      // bare absolute path like `F:\...\loader.mjs` parses as a URL with scheme
+      // `f:` and the worker dies at startup with ERR_UNSUPPORTED_ESM_URL_SCHEME,
+      // so hand Node a file:// URL instead.
       if (activePlugin.packagePath && existsSync(DEV_TSX_LOADER_PATH)) {
-        workerOptions.execArgv = ["--import", DEV_TSX_LOADER_PATH];
+        workerOptions.execArgv = ["--import", pathToFileURL(DEV_TSX_LOADER_PATH).href];
       }
 
       await workerManager.startWorker(pluginId, workerOptions);
