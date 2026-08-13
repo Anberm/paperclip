@@ -572,6 +572,8 @@ export interface IssueFilters {
   offset?: number;
   sortField?: "updated";
   sortDir?: "asc" | "desc";
+  /** ISO 8601 timestamp — only return issues with updatedAt strictly after this value. */
+  updatedSince?: string;
 }
 
 type IssueRow = typeof issues.$inferSelect;
@@ -5531,6 +5533,12 @@ export function issueService(db: Db) {
           )!,
         );
       }
+      if (filters?.updatedSince) {
+        const since = new Date(filters.updatedSince);
+        if (Number.isFinite(since.getTime())) {
+          conditions.push(gt(issues.updatedAt, since));
+        }
+      }
       if (filters?.excludeRoutineExecutions && !filters?.originKind && !filters?.originId) {
         conditions.push(ne(issues.originKind, "routine_execution"));
       }
@@ -8691,6 +8699,40 @@ export function issueService(db: Db) {
         .update(issues)
         .set({ updatedAt: new Date() })
         .where(eq(issues.id, issueId));
+
+      if (
+        authorType === "user" &&
+        actor.userId &&
+        actor.userId !== "board-concierge" &&
+        !createdByRunId
+      ) {
+        const { issueThreadInteractionService } = await import("./issue-thread-interactions.js");
+        const expiredInteractions = await issueThreadInteractionService(dbOrTx)
+          .expireRequestConfirmationsSupersededByComment(
+            { id: issueId, companyId: issue.companyId },
+            comment,
+            { agentId: actor.agentId, userId: actor.userId },
+          );
+        for (const interaction of expiredInteractions) {
+          await logActivity(dbOrTx, {
+            companyId: issue.companyId,
+            actorType: "user",
+            actorId: actor.userId,
+            agentId: actor.agentId ?? null,
+            runId: createdByRunId,
+            action: "issue.thread_interaction_expired",
+            entityType: "issue",
+            entityId: issueId,
+            details: {
+              interactionId: interaction.id,
+              interactionKind: interaction.kind,
+              interactionStatus: interaction.status,
+              source: "issue.comment.service",
+              result: interaction.result ?? null,
+            },
+          });
+        }
+      }
 
       return redactIssueComment(comment, currentUserRedactionOptions.enabled);
     },
