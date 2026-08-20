@@ -48,8 +48,8 @@ import {
 } from "../issue-execution-policy.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-  buildIssueBlockersResolvedWakeIdempotencyKey,
-  findExistingIssueBlockersResolvedWakeForAnyKey,
+  buildIssueBlockersResolvedWakeStateKey,
+  findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../issue-dependency-wakeups.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { getRunLogStore } from "../run-log-store.js";
@@ -58,6 +58,7 @@ import {
   FINISH_SUCCESSFUL_RUN_HANDOFF_REASON,
   SUCCESSFUL_RUN_MISSING_STATE_REASON,
   buildSuccessfulRunHandoffExhaustedNotice,
+  isPluginManagedIssueLifecycle,
   noticeMetadataReferencesRecoveryAction,
   type SuccessfulRunHandoffNotice,
 } from "./successful-run-handoff.js";
@@ -4116,6 +4117,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
       const handoffEvidence = isExhaustedSuccessfulRunHandoff(latestRun);
       if (handoffEvidence) {
+        if (isPluginManagedIssueLifecycle(issue)) {
+          result.skipped += 1;
+          continue;
+        }
         if (!handoffEvidence.exhausted) {
           result.skipped += 1;
           continue;
@@ -5243,19 +5248,19 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           continue;
         }
 
-        const idempotencyKeys = readiness.blockerIssueIds.map((blockerIssueId) =>
-          buildIssueBlockersResolvedWakeIdempotencyKey({
-            dependentIssueId: candidate.id,
-            resolvedBlockerIssueId: blockerIssueId,
-          })
-        );
-        const idempotencyKey = buildIssueBlockersResolvedWakeIdempotencyKey({
+        // Level-triggered dedup: key on the full blocker set (the current ready
+        // state), not on any single resolved edge. An older completed per-edge
+        // wake for an earlier partial resolution has a different key, so it does
+        // not suppress this wake. The shared helper still suppresses a duplicate
+        // wake for the SAME ready state, which bounds reconciliation.
+        const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: candidate.id,
-          resolvedBlockerIssueId,
+          blockerIssueIds: readiness.blockerIssueIds,
         });
-        const existingWake = await findExistingIssueBlockersResolvedWakeForAnyKey(db, {
+        const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(db, {
           companyId,
-          idempotencyKeys,
+          dependentIssueId: candidate.id,
+          blockerIssueIds: readiness.blockerIssueIds,
         });
         if (existingWake) {
           result.existingWakeSkipped += 1;

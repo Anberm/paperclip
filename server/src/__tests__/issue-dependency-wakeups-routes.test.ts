@@ -3,10 +3,11 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
-const mockFindExistingIssueBlockersResolvedWake = vi.hoisted(() => vi.fn(async () => null));
+const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
 const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
   getById: vi.fn(),
+  getByIdForUpdate: vi.fn(),
   getByIdentifier: vi.fn(async () => null),
   getComment: vi.fn(),
   getCommentCursor: vi.fn(),
@@ -97,7 +98,8 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
   );
   return {
     ...actual,
-    findExistingIssueBlockersResolvedWake: mockFindExistingIssueBlockersResolvedWake,
+    findExistingIssueBlockersResolvedWakeForReadyState:
+      mockFindExistingIssueBlockersResolvedWakeForReadyState,
   };
 });
 
@@ -114,6 +116,7 @@ async function createApp() {
     select: vi.fn(() => ({
       from: vi.fn(() => query),
     })),
+    transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
   };
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
@@ -143,8 +146,9 @@ describe("issue dependency wakeups in issue routes", () => {
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");
     vi.clearAllMocks();
-    mockFindExistingIssueBlockersResolvedWake.mockResolvedValue(null);
+    mockFindExistingIssueBlockersResolvedWakeForReadyState.mockResolvedValue(null);
     mockIssueService.getAncestors.mockResolvedValue([]);
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
     mockIssueService.getComment.mockResolvedValue(null);
     mockIssueService.getCommentCursor.mockResolvedValue({
       totalComments: 0,
