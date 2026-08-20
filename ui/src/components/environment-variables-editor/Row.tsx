@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
+  CircleSlash,
   KeyRound,
   MoreHorizontal,
   ShieldAlert,
@@ -202,6 +203,9 @@ export function EnvironmentVariableRow({
         "group/row grid grid-cols-(--gtc-13) items-start gap-x-1.5 gap-y-1 rounded-md px-1 py-1",
         "@[40rem]/env:grid-cols-(--gtc-14) @[40rem]/env:items-center",
         isDirty && "bg-amber-500/[0.06] ring-1 ring-amber-500/20",
+        // Parked row: dimmed so the live set reads at a glance. The toggle
+        // itself keeps full opacity so it stays discoverable and clickable.
+        !row.enabled && "opacity-55",
       )}
     >
       {/* Name cell — mobile col 1 / desktop col 1 */}
@@ -591,6 +595,31 @@ export function EnvironmentVariableRow({
             </DropdownMenuContent>
           </DropdownMenu>
         ) : null}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={row.enabled}
+              onClick={() => onPatch({ enabled: !row.enabled })}
+              disabled={disabled}
+              aria-label={`${row.enabled ? "Disable" : "Enable"} ${row.name.trim() || "variable"}`}
+              className={cn(
+                "rounded p-1 opacity-100 hover:bg-accent hover:text-foreground",
+                row.enabled
+                  ? "text-muted-foreground @[40rem]/env:opacity-0 @[40rem]/env:group-hover/row:opacity-100 @[40rem]/env:group-focus-within/row:opacity-100"
+                  : // Off is a state worth seeing without hovering, so a
+                    // disabled row keeps its toggle permanently visible.
+                    "text-amber-600 dark:text-amber-400",
+              )}
+            >
+              <CircleSlash className="size-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {row.enabled ? "Disable — keep it here but stop injecting it" : "Disabled — not injected into runs"}
+          </TooltipContent>
+        </Tooltip>
         <button
           type="button"
           onClick={onRemove}

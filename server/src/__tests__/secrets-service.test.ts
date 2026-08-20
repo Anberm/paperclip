@@ -682,6 +682,120 @@ describeEmbeddedPostgres("secretService", () => {
     expect(JSON.stringify(events)).not.toContain("runtime-secret");
   });
 
+  it("skips disabled env bindings at resolution and leaves enabled siblings untouched", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const env = {
+      ANTHROPIC_BASE_URL: { type: "plain" as const, value: "https://api.deepseek.com/anthropic" },
+      OFF_LANE_BASE_URL: {
+        type: "plain" as const,
+        value: "https://api.anthropic.com",
+        enabled: false,
+      },
+    };
+
+    const resolved = await svc.resolveEnvBindings(companyId, env, {
+      consumerType: "agent",
+      consumerId: "agent-1",
+      actorType: "agent",
+      actorId: "agent-1",
+    });
+
+    expect(resolved.env).toEqual({ ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic" });
+    expect(resolved.env).not.toHaveProperty("OFF_LANE_BASE_URL");
+  });
+
+  it("persists enabled:false and keeps enabled bindings byte-identical", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+
+    const normalized = await svc.normalizeEnvBindingsForPersistence(companyId, {
+      LIVE: { type: "plain", value: "on" },
+      PARKED: { type: "plain", value: "off", enabled: false },
+      LEGACY_STRING: "bare",
+    });
+
+    // An enabled binding must not gain an `enabled` key: adopting the switch
+    // may not rewrite existing rows or perturb run-config fingerprints.
+    expect(normalized.LIVE).toEqual({ type: "plain", value: "on" });
+    expect(normalized.LEGACY_STRING).toEqual({ type: "plain", value: "bare" });
+    expect(normalized.PARKED).toEqual({ type: "plain", value: "off", enabled: false });
+  });
+
+  it("never resolves or records access for a disabled secret ref", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const secret = await svc.create(companyId, {
+      name: `disabled-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "must-not-be-read",
+    });
+    const env = {
+      API_KEY: {
+        type: "secret_ref" as const,
+        secretId: secret.id,
+        version: "latest" as const,
+        enabled: false,
+      },
+    };
+    const context = {
+      consumerType: "agent" as const,
+      consumerId: "agent-1",
+      actorType: "agent" as const,
+      actorId: "agent-1",
+    };
+
+    await svc.syncEnvBindingsForTarget(companyId, { targetType: "agent", targetId: "agent-1" }, env);
+
+    // Resolution skips it entirely — no value, and no "not bound" throw even
+    // though sync deliberately created no binding for a disabled ref.
+    const resolved = await svc.resolveEnvBindings(companyId, env, context);
+    expect(resolved.env).toEqual({});
+    expect(await svc.listAccessEvents(companyId, secret.id)).toHaveLength(0);
+
+    // Disabling also withdraws the access the binding would have granted:
+    // re-enabling the same ref without re-syncing is unbound.
+    await expect(
+      svc.resolveEnvBindings(
+        companyId,
+        { API_KEY: { type: "secret_ref" as const, secretId: secret.id, version: "latest" as const } },
+        context,
+      ),
+    ).rejects.toThrow(/not bound/i);
+  });
+
+  it("does not report a disabled unbound secret ref as a missing runtime binding", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const secret = await svc.create(companyId, {
+      name: `parked-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "parked",
+    });
+    const context = {
+      consumerType: "agent" as const,
+      consumerId: "agent-1",
+      actorType: "agent" as const,
+      actorId: "agent-1",
+    };
+
+    const disabled = await svc.collectMissingRuntimeBindings(
+      companyId,
+      { API_KEY: { type: "secret_ref", secretId: secret.id, version: "latest", enabled: false } },
+      context,
+    );
+    expect(disabled).toEqual([]);
+
+    // Same ref, enabled and unbound, is still a blocker.
+    const enabled = await svc.collectMissingRuntimeBindings(
+      companyId,
+      { API_KEY: { type: "secret_ref", secretId: secret.id, version: "latest" } },
+      context,
+    );
+    expect(enabled).toHaveLength(1);
+    expect(enabled[0]?.envKey).toBe("API_KEY");
+  });
+
   it("collects declared secret refs that have no binding without resolving values", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);

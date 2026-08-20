@@ -560,13 +560,14 @@ async function cleanupPreparedProviderWrite(input: {
 }
 
 type CanonicalEnvBinding =
-  | { type: "plain"; value: string }
+  | { type: "plain"; value: string; enabled: boolean }
   | {
       type: "secret_ref";
       secretId: string;
       version: number | "latest";
       projectionClass: SecretProjectionClass;
       projectionAllowlistKey: string | null;
+      enabled: boolean;
     }
   | {
       type: "user_secret_ref";
@@ -574,6 +575,7 @@ type CanonicalEnvBinding =
       version: number | "latest";
       required: boolean;
       allowMissingOverride: boolean;
+      enabled: boolean;
     };
 
 type SecretAccessConsumerType = SecretBindingTargetType | "agent_api" | "plugin_worker";
@@ -726,11 +728,14 @@ function deriveSecretNameFromExternalRef(externalRef: string) {
 }
 
 function canonicalizeBinding(binding: EnvBinding): CanonicalEnvBinding {
+  // Absent `enabled` means enabled: every binding written before the switch
+  // existed, and the legacy bare-string form, stay live.
   if (typeof binding === "string") {
-    return { type: "plain", value: binding };
+    return { type: "plain", value: binding, enabled: true };
   }
+  const enabled = binding.enabled !== false;
   if (binding.type === "plain") {
-    return { type: "plain", value: String(binding.value) };
+    return { type: "plain", value: String(binding.value), enabled };
   }
   if (binding.type === "user_secret_ref") {
     return {
@@ -739,6 +744,7 @@ function canonicalizeBinding(binding: EnvBinding): CanonicalEnvBinding {
       version: binding.version ?? "latest",
       required: binding.required ?? true,
       allowMissingOverride: binding.allowMissingOverride ?? false,
+      enabled,
     };
   }
   return {
@@ -747,7 +753,36 @@ function canonicalizeBinding(binding: EnvBinding): CanonicalEnvBinding {
     version: binding.version ?? "latest",
     projectionClass: binding.projectionClass ?? "unclassified",
     projectionAllowlistKey: binding.projectionAllowlistKey ?? null,
+    enabled,
   };
+}
+
+/**
+ * Persisted form of a binding: `enabled` is written only when the binding is
+ * disabled. An enabled binding therefore round-trips to byte-identical JSON,
+ * so adopting this field never rewrites existing rows and never perturbs the
+ * run-config fingerprints computed over them.
+ */
+function withPersistedEnabled(
+  binding:
+    | { type: "plain"; value: string }
+    | {
+        type: "secret_ref";
+        secretId: string;
+        version: number | "latest";
+        projectionClass: SecretProjectionClass;
+        projectionAllowlistKey: string | null;
+      }
+    | {
+        type: "user_secret_ref";
+        key: string;
+        version: number | "latest";
+        required: boolean;
+        allowMissingOverride: boolean;
+      },
+  enabled: boolean,
+): EnvBinding {
+  return enabled ? binding : { ...binding, enabled: false };
 }
 
 function assertClass3StaticLeaseAllowed(input: {
@@ -1826,6 +1861,9 @@ export function secretService(db: Db) {
 
       const binding = canonicalizeBinding(parsed.data as EnvBinding);
       if (binding.type === "plain") {
+        // Strict-mode and redaction guards still apply to a disabled binding:
+        // it is parked configuration, not an exemption from how values may be
+        // stored, and it can be re-enabled at any time.
         if (opts?.strictMode && isSensitiveEnvKey(key) && binding.value.trim().length > 0) {
           throw unprocessable(
             `Strict secret mode requires secret references for sensitive key: ${key}`,
@@ -1834,22 +1872,37 @@ export function secretService(db: Db) {
         if (binding.value === REDACTED_SENTINEL) {
           throw unprocessable(`Refusing to persist redacted placeholder for key: ${key}`);
         }
-        normalized[key] = binding;
+        normalized[key] = withPersistedEnabled(
+          { type: "plain", value: binding.value },
+          binding.enabled,
+        );
         continue;
       }
       if (binding.type === "user_secret_ref") {
-        normalized[key] = binding;
+        normalized[key] = withPersistedEnabled(
+          {
+            type: "user_secret_ref",
+            key: binding.key,
+            version: binding.version,
+            required: binding.required,
+            allowMissingOverride: binding.allowMissingOverride,
+          },
+          binding.enabled,
+        );
         continue;
       }
 
       await assertSecretInCompany(companyId, binding.secretId);
-      normalized[key] = {
-        type: "secret_ref",
-        secretId: binding.secretId,
-        version: binding.version,
-        projectionClass: binding.projectionClass,
-        projectionAllowlistKey: binding.projectionAllowlistKey,
-      };
+      normalized[key] = withPersistedEnabled(
+        {
+          type: "secret_ref",
+          secretId: binding.secretId,
+          version: binding.version,
+          projectionClass: binding.projectionClass,
+          projectionAllowlistKey: binding.projectionAllowlistKey,
+        },
+        binding.enabled,
+      );
     }
     return normalized;
   }
@@ -4742,6 +4795,12 @@ export function secretService(db: Db) {
         const parsed = envBindingSchema.safeParse(rawBinding);
         if (!parsed.success) continue;
         const binding = canonicalizeBinding(parsed.data as EnvBinding);
+        // Skip disabled refs so the synced binding set mirrors what the target
+        // actually consumes. This matters beyond bookkeeping: an `env.*`
+        // secret binding also grants the consumer API read access to that
+        // secret, so leaving a binding behind for a disabled ref would keep
+        // access alive after an operator switched the variable off.
+        if (!binding.enabled) continue;
         if (binding.type === "user_secret_ref") {
           await resolveUserSecretDefinition(companyId, { definitionKey: binding.key }, bindingDb, {
             envKey: key,
@@ -4909,6 +4968,10 @@ export function secretService(db: Db) {
           throw unprocessable(`Invalid environment binding for key: ${key}`);
         }
         const binding = canonicalizeBinding(parsed.data as EnvBinding);
+        // A disabled binding is parked configuration: never injected, and for
+        // a secret ref never resolved — so disabling also stops the secret
+        // access (and its audit event) that resolution would otherwise cause.
+        if (!binding.enabled) continue;
         if (binding.type === "plain") {
           resolved[key] = binding.value;
         } else if (binding.type === "secret_ref") {
@@ -4969,6 +5032,9 @@ export function secretService(db: Db) {
         const parsed = envBindingSchema.safeParse(rawBinding);
         if (!parsed.success) return [];
         const binding = canonicalizeBinding(parsed.data as EnvBinding);
+        // A disabled ref is never resolved at dispatch, so a missing binding
+        // for it is not a configuration-incomplete blocker.
+        if (!binding.enabled) return [];
         if (binding.type !== "secret_ref") return [];
         return [{ key, configPath: `env.${key}`, secretId: binding.secretId }];
       });
@@ -4977,6 +5043,7 @@ export function secretService(db: Db) {
         const parsed = envBindingSchema.safeParse(rawBinding);
         if (!parsed.success) return [];
         const binding = canonicalizeBinding(parsed.data as EnvBinding);
+        if (!binding.enabled) return [];
         if (binding.type !== "user_secret_ref") return [];
         if (!binding.required || binding.allowMissingOverride) return [];
         return [{ key, configPath: `env.${key}`, binding }];
@@ -5312,6 +5379,9 @@ export function secretService(db: Db) {
               throw unprocessable(`Invalid environment binding for key: ${key}`);
             }
             const binding = canonicalizeBinding(parsed.data as EnvBinding);
+            // Same contract as resolveEnvBindings: disabled bindings are
+            // parked configuration and never reach the adapter process.
+            if (!binding.enabled) continue;
             if (binding.type === "plain") {
               env[key] = binding.value;
             } else if (binding.type === "secret_ref") {

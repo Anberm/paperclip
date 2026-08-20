@@ -26,12 +26,23 @@ export type {
 
 export type SecretVersionSelector = number | "latest";
 
-export interface EnvPlainBinding {
+/**
+ * Opt-out switch shared by every env binding shape. Absent means enabled, so
+ * bindings written before this field existed keep working untouched. A
+ * disabled binding stays persisted and editable but is never injected into a
+ * run's environment, so an operator can park a whole provider's configuration
+ * next to the live one instead of deleting and retyping it.
+ */
+export interface EnvBindingToggle {
+  enabled?: boolean;
+}
+
+export interface EnvPlainBinding extends EnvBindingToggle {
   type: "plain";
   value: string;
 }
 
-export interface EnvSecretRefBinding {
+export interface EnvSecretRefBinding extends EnvBindingToggle {
   type: "secret_ref";
   secretId: string;
   version?: SecretVersionSelector;
@@ -39,7 +50,7 @@ export interface EnvSecretRefBinding {
   projectionAllowlistKey?: string | null;
 }
 
-export interface EnvUserSecretRefBinding {
+export interface EnvUserSecretRefBinding extends EnvBindingToggle {
   type: "user_secret_ref";
   key: string;
   version?: SecretVersionSelector;

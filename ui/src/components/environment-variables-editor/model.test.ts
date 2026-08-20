@@ -106,6 +106,51 @@ describe("rowsFromValue", () => {
   });
 });
 
+describe("enabled switch", () => {
+  function row(partial: Partial<EnvRow>): EnvRow {
+    return { ...emptyRow(), ...partial };
+  }
+
+  it("reads absent enabled as on, and enabled:false as off", () => {
+    const rows = rowsFromValue({
+      LEGACY: "raw",
+      LIVE: { type: "plain", value: "v" },
+      PARKED: { type: "plain", value: "v", enabled: false },
+      PARKED_REF: { type: "secret_ref", secretId: "s1", enabled: false },
+      PARKED_USER_REF: { type: "user_secret_ref", key: "github_token", enabled: false },
+    });
+    expect(rows.map((r) => [r.name, r.enabled])).toEqual([
+      ["LEGACY", true],
+      ["LIVE", true],
+      ["PARKED", false],
+      ["PARKED_REF", false],
+      ["PARKED_USER_REF", false],
+    ]);
+  });
+
+  it("emits enabled:false only for disabled rows, leaving enabled rows byte-identical", () => {
+    expect(
+      valueFromRows([
+        row({ name: "LIVE", textValue: "v" }),
+        row({ name: "PARKED", textValue: "v", enabled: false }),
+        row({ name: "PARKED_REF", source: "secret", secretId: "s1", enabled: false }),
+      ]),
+    ).toEqual({
+      LIVE: { type: "plain", value: "v" },
+      PARKED: { type: "plain", value: "v", enabled: false },
+      PARKED_REF: { type: "secret_ref", secretId: "s1", version: "latest", enabled: false },
+    });
+  });
+
+  it("round-trips a disabled binding through rows and back", () => {
+    const value = {
+      LIVE: { type: "plain" as const, value: "on" },
+      PARKED: { type: "plain" as const, value: "off", enabled: false },
+    };
+    expect(valueFromRows(rowsFromValue(value))).toEqual(value);
+  });
+});
+
 describe("valueFromRows (emit semantics)", () => {
   function row(partial: Partial<EnvRow>): EnvRow {
     return { ...emptyRow(), ...partial };

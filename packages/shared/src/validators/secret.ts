@@ -12,9 +12,16 @@ const secretKeySchema = z.string().trim().min(1).max(120).regex(/^[a-zA-Z0-9_.-]
 const secretVersionSelectorSchema = z.union([z.literal("latest"), z.number().int().positive()]);
 const creatableSecretStatusSchema = z.enum(["active", "disabled", "archived"]);
 
+// Opt-out switch on every binding shape. Left `.optional()` rather than
+// `.default(true)` on purpose: a default would materialize `enabled: true`
+// into every binding on the next save, rewriting rows that never opted in and
+// churning the run-config fingerprints derived from them. Absent === enabled.
+const envBindingEnabledSchema = z.boolean().optional();
+
 export const envBindingPlainSchema = z.object({
   type: z.literal("plain"),
   value: z.string(),
+  enabled: envBindingEnabledSchema,
 });
 
 export const envBindingSecretRefSchema = z.object({
@@ -23,6 +30,7 @@ export const envBindingSecretRefSchema = z.object({
   version: secretVersionSelectorSchema.optional(),
   projectionClass: z.enum(SECRET_PROJECTION_CLASSES).optional(),
   projectionAllowlistKey: z.string().trim().min(1).max(160).optional().nullable(),
+  enabled: envBindingEnabledSchema,
 });
 
 export const envBindingUserSecretRefSchema = z.object({
@@ -31,6 +39,7 @@ export const envBindingUserSecretRefSchema = z.object({
   version: secretVersionSelectorSchema.optional(),
   required: z.boolean().optional().default(true),
   allowMissingOverride: z.boolean().optional().default(false),
+  enabled: envBindingEnabledSchema,
 });
 
 // Backward-compatible union that accepts legacy inline values.

@@ -13,6 +13,12 @@ export interface EnvRow {
   userSecretKey: string;
   required: boolean;
   version: SecretVersionSelector;
+  /**
+   * Whether the variable is injected into runs. A disabled row keeps its name
+   * and value but is skipped at resolution, so a second provider's settings can
+   * sit parked next to the live ones instead of being deleted and retyped.
+   */
+  enabled: boolean;
   /** Session-local dismissal of the sensitive-value suggestion (§6.6). */
   sensitiveDismissed?: boolean;
 }
@@ -33,7 +39,13 @@ export function emptyRow(source: RowSource = "text"): EnvRow {
     userSecretKey: "",
     required: true,
     version: "latest",
+    enabled: true,
   };
+}
+
+/** Absent `enabled` means enabled — matches the server's binding contract. */
+function bindingEnabled(binding: unknown): boolean {
+  return (binding as { enabled?: unknown } | null)?.enabled !== false;
 }
 
 function isSecretRef(binding: unknown): binding is { type: "secret_ref"; secretId?: unknown; version?: unknown } {
@@ -80,6 +92,7 @@ export function rowsFromValue(value: Record<string, EnvBinding> | null | undefin
         source: "secret" as const,
         secretId: typeof binding.secretId === "string" ? binding.secretId : "",
         version,
+        enabled: bindingEnabled(binding),
       };
     }
     if (isUserSecretRef(binding)) {
@@ -91,6 +104,7 @@ export function rowsFromValue(value: Record<string, EnvBinding> | null | undefin
         userSecretKey: typeof binding.key === "string" ? binding.key : "",
         required: binding.required !== false,
         version,
+        enabled: bindingEnabled(binding),
       };
     }
     if (isPlainObj(binding)) {
@@ -99,6 +113,7 @@ export function rowsFromValue(value: Record<string, EnvBinding> | null | undefin
         name,
         source: "text" as const,
         textValue: typeof binding.value === "string" ? binding.value : "",
+        enabled: bindingEnabled(binding),
       };
     }
     return { ...emptyRow(), name };
@@ -112,23 +127,34 @@ export function rowsFromValue(value: Record<string, EnvBinding> | null | undefin
  */
 export function valueFromRows(rows: EnvRow[]): Record<string, EnvBinding> | undefined {
   const record: Record<string, EnvBinding> = {};
+  // `enabled` is emitted only when the row is off, mirroring the server's
+  // persistence rule: an enabled binding stays byte-identical to what an
+  // editor without this switch would have produced.
+  const withEnabled = (binding: EnvBinding & object, enabled: boolean): EnvBinding =>
+    enabled ? binding : { ...binding, enabled: false };
   for (const row of rows) {
     const name = row.name.trim();
     if (!name) continue;
     if (row.source === "secret") {
       if (!row.secretId) continue; // incomplete ref — not emitted
-      record[name] = { type: "secret_ref", secretId: row.secretId, version: row.version };
+      record[name] = withEnabled(
+        { type: "secret_ref", secretId: row.secretId, version: row.version },
+        row.enabled,
+      );
     } else if (row.source === "user_secret") {
       const key = row.userSecretKey.trim();
       if (!key) continue;
-      record[name] = {
-        type: "user_secret_ref",
-        key,
-        version: row.version,
-        required: row.required,
-      };
+      record[name] = withEnabled(
+        {
+          type: "user_secret_ref",
+          key,
+          version: row.version,
+          required: row.required,
+        },
+        row.enabled,
+      );
     } else {
-      record[name] = { type: "plain", value: row.textValue };
+      record[name] = withEnabled({ type: "plain", value: row.textValue }, row.enabled);
     }
   }
   return Object.keys(record).length > 0 ? record : undefined;
