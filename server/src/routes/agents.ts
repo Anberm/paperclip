@@ -2,8 +2,8 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
-import { agents as agentsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
-import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
+import { agents as agentsTable, agentModelSwitchPresets, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
+import { and, asc, desc, eq, inArray, not, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
   agentMineInboxQuerySchema,
@@ -27,6 +27,10 @@ import {
   updateAgentInstructionsPathSchema,
   wakeAgentSchema,
   updateAgentSchema,
+  agentModelSwitchSchema,
+  agentModelSwitchPresetCreateSchema,
+  agentModelSwitchPresetUpdateSchema,
+  agentModelSwitchApplySchema,
   supportedEnvironmentDriversForAdapter,
   LOW_TRUST_REVIEW_PRESET,
   startAdapterAuthSessionRequestSchema,
@@ -147,6 +151,12 @@ import {
   createProductionLoginSessionRuntime,
 } from "../services/codex-device-login-service.js";
 import type { AdapterAuthSessionOwnerResponse } from "@paperclipai/shared";
+import type { AgentModelSwitch } from "@paperclipai/shared";
+import type {
+  AgentModelSwitchApply,
+  AgentModelSwitchPresetCreate,
+  AgentModelSwitchPresetUpdate,
+} from "@paperclipai/shared";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
 import { DEFAULT_GEMINI_LOCAL_MODEL } from "@paperclipai/adapter-gemini-local";
 import { DEFAULT_OPENCODE_LOCAL_MODEL } from "@paperclipai/adapter-opencode-local";
@@ -3928,6 +3938,292 @@ export function agentRoutes(
 
     res.json(agent);
   });
+
+  /**
+   * Bulk model switch for a company's agents.
+   *
+   * Replaces the ad-hoc SQL scripts that flip `adapter_config.model` on many
+   * agents at once. Each affected agent goes through the same normalization,
+   * config-revision and audit path as a single-agent PATCH. Agents the actor
+   * cannot update are skipped and reported rather than failing the whole batch.
+   */
+  async function runModelSwitch(
+    req: Request,
+    companyId: string,
+    body: AgentModelSwitch,
+    actor: ReturnType<typeof getActorInfo>,
+  ) {
+    const candidates = (await svc.list(companyId)).filter((agent) => {
+      if (agent.status === "terminated" || agent.status === "pending_approval") return false;
+      if (body.adapterType && agent.adapterType !== body.adapterType) return false;
+      if (body.agentIds?.length && !body.agentIds.includes(agent.id)) return false;
+      return true;
+    });
+
+    // Ordered model mapping. An empty `from` matches any current model.
+    const mappingTargets = body.mappings.map((mapping) => ({
+      from: (mapping.from ?? "").trim(),
+      to: mapping.to.trim(),
+    }));
+    function resolveModelChange(currentModel: string | null): { to: string; alreadySet: boolean } | null {
+      const current = currentModel?.trim() ?? "";
+      for (const mapping of mappingTargets) {
+        const matches = mapping.from === "" || current === mapping.from;
+        if (!matches) continue;
+        return { to: mapping.to, alreadySet: current === mapping.to };
+      }
+      return null;
+    }
+
+    const envOverrides = body.env && Object.keys(body.env).length > 0 ? body.env : null;
+    const hasEnvOverrides = envOverrides !== null;
+
+    const permissionCache = new Map<string, boolean>();
+    async function canUpdateAgentBulk(targetAgent: { id: string; companyId: string }): Promise<boolean> {
+      const cached = permissionCache.get(targetAgent.id);
+      if (cached !== undefined) return cached;
+      if (!hasCompanyAccess(req, targetAgent.companyId)) return false;
+      const decision = await access.decide({
+        actor: req.actor,
+        action: "agent_config:update",
+        resource: { type: "agent", companyId: targetAgent.companyId, agentId: targetAgent.id },
+      });
+      permissionCache.set(targetAgent.id, decision.allowed);
+      return decision.allowed;
+    }
+
+    const agents: Array<{
+      id: string;
+      name: string;
+      adapterType: string;
+      from: string | null;
+      to: string | null;
+      changed: boolean;
+      reason?: string;
+    }> = [];
+    let updatedCount = 0;
+    let skippedCount = 0;
+
+    for (const agent of candidates) {
+      const currentConfig = asRecord(agent.adapterConfig) ?? {};
+      const currentModel = asNonEmptyString(currentConfig.model);
+      const change = resolveModelChange(currentModel);
+      if (!change) {
+        skippedCount += 1;
+        agents.push({ id: agent.id, name: agent.name, adapterType: agent.adapterType, from: currentModel, to: null, changed: false, reason: "no_match" });
+        continue;
+      }
+      const changedEnv = hasEnvOverrides;
+      if (!changedEnv && change.alreadySet) {
+        skippedCount += 1;
+        agents.push({ id: agent.id, name: agent.name, adapterType: agent.adapterType, from: currentModel, to: change.to, changed: false, reason: "no_change" });
+        continue;
+      }
+      if (!(await canUpdateAgentBulk(agent))) {
+        skippedCount += 1;
+        agents.push({ id: agent.id, name: agent.name, adapterType: agent.adapterType, from: currentModel, to: change.to, changed: false, reason: "no_permission" });
+        continue;
+      }
+
+      let effectiveConfig: Record<string, unknown> = { ...currentConfig, model: change.to };
+      if (changedEnv) {
+        const existingEnv = asRecord(currentConfig.env) ?? {};
+        effectiveConfig.env = { ...existingEnv, ...envOverrides };
+      }
+      effectiveConfig = applyCodexLocalKeyIsolation(
+        companyId,
+        agent.id,
+        agent.adapterType,
+        applyCreateDefaultsByAdapterType(agent.adapterType, effectiveConfig),
+      );
+      const normalized = await normalizeMediatedAdapterConfigForPersistence({
+        companyId,
+        adapterType: agent.adapterType,
+        adapterConfig: effectiveConfig,
+      });
+      const patchData = {
+        adapterConfig: syncInstructionsBundleConfigFromFilePath(agent, normalized),
+      };
+
+      if (body.dryRun) {
+        updatedCount += 1;
+        agents.push({ id: agent.id, name: agent.name, adapterType: agent.adapterType, from: currentModel, to: change.to, changed: true });
+        continue;
+      }
+
+      const updatedAgent = await svc.update(agent.id, patchData, {
+        recordRevision: {
+          createdByAgentId: actor.agentId,
+          createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+          source: "bulk_model_switch",
+        },
+      });
+      if (!updatedAgent) {
+        skippedCount += 1;
+        agents.push({ id: agent.id, name: agent.name, adapterType: agent.adapterType, from: currentModel, to: change.to, changed: false, reason: "not_found" });
+        continue;
+      }
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action: "agent.updated",
+        entityType: "agent",
+        entityId: updatedAgent.id,
+        details: {
+          via: "model_switch",
+          from: currentModel,
+          to: change.to,
+          changedEnv,
+        },
+      });
+      updatedCount += 1;
+      agents.push({ id: agent.id, name: agent.name, adapterType: agent.adapterType, from: currentModel, to: change.to, changed: true });
+    }
+
+    return { dryRun: body.dryRun === true, updated: updatedCount, skipped: skippedCount, agents };
+  }
+
+  router.post("/companies/:companyId/agents/model-switch", validate(agentModelSwitchSchema), async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const body = req.body as AgentModelSwitch;
+    const actor = getActorInfo(req);
+    res.json(await runModelSwitch(req, companyId, body, actor));
+  });
+
+  router.get("/companies/:companyId/agents/model-switch-presets", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const rows = await db
+      .select()
+      .from(agentModelSwitchPresets)
+      .where(eq(agentModelSwitchPresets.companyId, companyId))
+      .orderBy(asc(agentModelSwitchPresets.name));
+    res.json(rows);
+  });
+
+  router.post(
+    "/companies/:companyId/agents/model-switch-presets",
+    validate(agentModelSwitchPresetCreateSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      const body = req.body as AgentModelSwitchPresetCreate;
+
+      const existing = await db
+        .select({ id: agentModelSwitchPresets.id })
+        .from(agentModelSwitchPresets)
+        .where(and(eq(agentModelSwitchPresets.companyId, companyId), eq(agentModelSwitchPresets.name, body.name)))
+        .limit(1);
+      if (existing.length > 0) {
+        res.status(409).json({ error: "A preset with this name already exists" });
+        return;
+      }
+
+      const [row] = await db
+        .insert(agentModelSwitchPresets)
+        .values({
+          companyId,
+          name: body.name,
+          adapterType: body.adapterType ?? null,
+          mappings: body.mappings,
+          env: body.env ?? null,
+        })
+        .returning();
+      res.status(201).json(row);
+    },
+  );
+
+  router.patch(
+    "/companies/:companyId/agents/model-switch-presets/:presetId",
+    validate(agentModelSwitchPresetUpdateSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const presetId = req.params.presetId as string;
+      assertCompanyAccess(req, companyId);
+      const body = req.body as AgentModelSwitchPresetUpdate;
+
+      if (body.name !== undefined) {
+        const existing = await db
+          .select({ id: agentModelSwitchPresets.id })
+          .from(agentModelSwitchPresets)
+          .where(and(eq(agentModelSwitchPresets.companyId, companyId), eq(agentModelSwitchPresets.name, body.name)))
+          .limit(1);
+        if (existing.length > 0 && existing[0].id !== presetId) {
+          res.status(409).json({ error: "A preset with this name already exists" });
+          return;
+        }
+      }
+
+      const values: Partial<Record<string, unknown>> = { updatedAt: new Date() };
+      if (body.name !== undefined) values.name = body.name;
+      if (body.adapterType !== undefined) values.adapterType = body.adapterType;
+      if (body.mappings !== undefined) values.mappings = body.mappings;
+      if (body.env !== undefined) values.env = body.env;
+
+      const [row] = await db
+        .update(agentModelSwitchPresets)
+        .set(values)
+        .where(and(eq(agentModelSwitchPresets.id, presetId), eq(agentModelSwitchPresets.companyId, companyId)))
+        .returning();
+      if (!row) {
+        res.status(404).json({ error: "Preset not found" });
+        return;
+      }
+      res.json(row);
+    },
+  );
+
+  router.delete("/companies/:companyId/agents/model-switch-presets/:presetId", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const presetId = req.params.presetId as string;
+    assertCompanyAccess(req, companyId);
+
+    const [row] = await db
+      .delete(agentModelSwitchPresets)
+      .where(and(eq(agentModelSwitchPresets.id, presetId), eq(agentModelSwitchPresets.companyId, companyId)))
+      .returning({ id: agentModelSwitchPresets.id });
+    if (!row) {
+      res.status(404).json({ error: "Preset not found" });
+      return;
+    }
+    res.status(204).end();
+  });
+
+  router.post(
+    "/companies/:companyId/agents/model-switch-presets/:presetId/apply",
+    validate(agentModelSwitchApplySchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const presetId = req.params.presetId as string;
+      assertCompanyAccess(req, companyId);
+      const body = req.body as AgentModelSwitchApply;
+
+      const preset = await db
+        .select()
+        .from(agentModelSwitchPresets)
+        .where(and(eq(agentModelSwitchPresets.id, presetId), eq(agentModelSwitchPresets.companyId, companyId)))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (!preset) {
+        res.status(404).json({ error: "Preset not found" });
+        return;
+      }
+
+      const actor = getActorInfo(req);
+      const result = await runModelSwitch(req, companyId, {
+        adapterType: preset.adapterType ?? undefined,
+        mappings: preset.mappings,
+        env: preset.env ?? undefined,
+        dryRun: body.dryRun === true,
+      }, actor);
+      res.json({ ...result, preset: { id: preset.id, name: preset.name } });
+    },
+  );
 
   router.post("/agents/:id/pause", async (req, res) => {
     assertBoard(req);

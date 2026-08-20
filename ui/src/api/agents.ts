@@ -96,6 +96,65 @@ export interface AgentWakeRequest {
   forceFreshSession?: boolean;
 }
 
+export interface ModelSwitchMapping {
+  from?: string;
+  to: string;
+}
+
+export interface ModelSwitchRequest {
+  adapterType?: string;
+  agentIds?: string[];
+  mappings: ModelSwitchMapping[];
+  env?: Record<string, string>;
+  dryRun?: boolean;
+}
+
+export interface ModelSwitchAgentResult {
+  id: string;
+  name: string;
+  adapterType: string;
+  from: string | null;
+  to: string | null;
+  changed: boolean;
+  reason?: string;
+}
+
+export interface ModelSwitchResult {
+  dryRun: boolean;
+  updated: number;
+  skipped: number;
+  agents: ModelSwitchAgentResult[];
+}
+
+export interface ModelSwitchPreset {
+  id: string;
+  companyId: string;
+  name: string;
+  adapterType: string | null;
+  mappings: ModelSwitchMapping[];
+  env: Record<string, string> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelSwitchPresetCreateRequest {
+  name: string;
+  adapterType?: string;
+  mappings: ModelSwitchMapping[];
+  env?: Record<string, string>;
+}
+
+export interface ModelSwitchPresetUpdateRequest {
+  name?: string;
+  adapterType?: string | null;
+  mappings?: ModelSwitchMapping[];
+  env?: Record<string, string> | null;
+}
+
+export interface ModelSwitchPresetApplyResult extends ModelSwitchResult {
+  preset: { id: string; name: string };
+}
+
 function withCompanyScope(path: string, companyId?: string) {
   if (!companyId) return path;
   const separator = path.includes("?") ? "&" : "?";
@@ -311,6 +370,26 @@ export const agentsApi = {
     ),
   availableSkills: () =>
     api.get<{ skills: AvailableSkill[] }>("/skills/available"),
+  modelSwitch: (companyId: string, data: ModelSwitchRequest) =>
+    api.post<ModelSwitchResult>(`/companies/${companyId}/agents/model-switch`, data),
+  modelSwitchPresets: {
+    list: (companyId: string) =>
+      api.get<ModelSwitchPreset[]>(`/companies/${companyId}/agents/model-switch-presets`),
+    create: (companyId: string, data: ModelSwitchPresetCreateRequest) =>
+      api.post<ModelSwitchPreset>(`/companies/${companyId}/agents/model-switch-presets`, data),
+    update: (companyId: string, presetId: string, data: ModelSwitchPresetUpdateRequest) =>
+      api.patch<ModelSwitchPreset>(
+        `/companies/${companyId}/agents/model-switch-presets/${presetId}`,
+        data,
+      ),
+    remove: (companyId: string, presetId: string) =>
+      api.delete<{ ok: true }>(`/companies/${companyId}/agents/model-switch-presets/${presetId}`),
+    apply: (companyId: string, presetId: string, data: { dryRun?: boolean }) =>
+      api.post<ModelSwitchPresetApplyResult>(
+        `/companies/${companyId}/agents/model-switch-presets/${presetId}/apply`,
+        data,
+      ),
+  },
 };
 
 export interface AvailableSkill {

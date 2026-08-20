@@ -351,6 +351,11 @@ export {
   testAdapterEnvironmentSchema,
   agentPermissionsSchema,
   updateAgentPermissionsSchema,
+  agentModelSwitchSchema,
+  agentModelSwitchMappingSchema,
+  agentModelSwitchPresetCreateSchema,
+  agentModelSwitchPresetUpdateSchema,
+  agentModelSwitchApplySchema,
   type CreateAgent,
   type BuiltInAgentProvision,
   type BuiltInAgentReset,
@@ -368,6 +373,11 @@ export {
   type ResetAgentSession,
   type TestAdapterEnvironment,
   type UpdateAgentPermissions,
+  type AgentModelSwitch,
+  type AgentModelSwitchMapping,
+  type AgentModelSwitchPresetCreate,
+  type AgentModelSwitchPresetUpdate,
+  type AgentModelSwitchApply,
 } from "./agent.js";
 
 export {

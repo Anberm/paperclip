@@ -23,7 +23,7 @@ import { relativeTime, cn, agentRouteRef, agentUrl } from "../lib/utils";
 import { PageTabBar } from "../components/PageTabBar";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, Bot, Plus, List, GitBranch } from "lucide-react";
+import { AlertTriangle, ArrowRightLeft, Bot, Plus, List, GitBranch } from "lucide-react";
 import { AGENT_ROLE_LABELS, type Agent, type Environment, type EnvironmentCapabilities } from "@paperclipai/shared";
 import {
   isStarred,
@@ -42,6 +42,12 @@ const roleLabels = AGENT_ROLE_LABELS as Record<string, string>;
 const ConfigureBuiltInAgentModal = lazy(() =>
   import("../components/ConfigureBuiltInAgentModal").then((m) => ({
     default: m.ConfigureBuiltInAgentModal,
+  })),
+);
+
+const ModelSwitchDialog = lazy(() =>
+  import("../components/ModelSwitchDialog").then((m) => ({
+    default: m.ModelSwitchDialog,
   })),
 );
 
@@ -225,6 +231,7 @@ export function Agents() {
   }, [builtInAgents, builtInAgentsEnabled]);
   const builtInAgentIds = useMemo(() => new Set(builtInByAgentId.keys()), [builtInByAgentId]);
   const [configureState, setConfigureState] = useState<BuiltInAgentState | null>(null);
+  const [modelSwitchOpen, setModelSwitchOpen] = useState(false);
 
   const { data: agents, isLoading, error } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -532,6 +539,10 @@ export function Agents() {
               </button>
             </div>
           )}
+          <Button size="sm" variant="outline" onClick={() => setModelSwitchOpen(true)}>
+            <ArrowRightLeft className="h-3.5 w-3.5 mr-1.5" />
+            Switch models
+          </Button>
           <Button size="sm" variant="outline" onClick={openNewAgent}>
             <Plus className="h-3.5 w-3.5 mr-1.5" />
             New Agent
@@ -610,6 +621,16 @@ export function Agents() {
             onOpenChange={(open) => {
               if (!open) setConfigureState(null);
             }}
+          />
+        </Suspense>
+      )}
+      {selectedCompanyId && (
+        <Suspense fallback={null}>
+          <ModelSwitchDialog
+            companyId={selectedCompanyId}
+            agents={agents ?? []}
+            open={modelSwitchOpen}
+            onOpenChange={setModelSwitchOpen}
           />
         </Suspense>
       )}

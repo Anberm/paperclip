@@ -2293,6 +2293,16 @@ export {
   type PluginStateScopeKey,
   type SetPluginState,
   type ListPluginState,
+  agentModelSwitchSchema,
+  agentModelSwitchMappingSchema,
+  agentModelSwitchPresetCreateSchema,
+  agentModelSwitchPresetUpdateSchema,
+  agentModelSwitchApplySchema,
+  type AgentModelSwitch,
+  type AgentModelSwitchMapping,
+  type AgentModelSwitchPresetCreate,
+  type AgentModelSwitchPresetUpdate,
+  type AgentModelSwitchApply,
 } from "./validators/index.js";
 
 export { API_PREFIX, API } from "./api.js";

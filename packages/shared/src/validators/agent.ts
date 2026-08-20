@@ -231,6 +231,70 @@ export const testAdapterEnvironmentSchema = z.object({
 
 export type TestAdapterEnvironment = z.infer<typeof testAdapterEnvironmentSchema>;
 
+export const agentModelSwitchMappingSchema = z.object({
+  /**
+   * The current model to match. When omitted or empty, the mapping matches any
+   * agent in scope whose model is not already equal to `to`.
+   */
+  from: z.string().trim().max(256).optional(),
+  to: z.string().trim().min(1).max(256),
+}).strict();
+
+export const agentModelSwitchSchema = z.object({
+  /** Restrict the switch to agents using this adapter type (e.g. claude_local). */
+  adapterType: z.string().trim().min(1).max(128).optional(),
+  /** Restrict the switch to an explicit subset of agent ids. */
+  agentIds: z.array(z.string().uuid()).max(500).optional(),
+  /**
+   * Ordered model mappings. The first mapping whose `from` matches an agent's
+   * current model (exact match; an empty `from` matches any model) wins.
+   */
+  mappings: z.array(agentModelSwitchMappingSchema).min(1).max(50),
+  /**
+   * Optional env overrides merged into every affected agent's
+   * adapterConfig.env (values are plain strings; existing keys are replaced).
+   */
+  env: z.record(z.string(), z.string()).optional(),
+  /** When true, report which agents would change without persisting anything. */
+  dryRun: z.boolean().optional().default(false),
+}).strict();
+
+export type AgentModelSwitch = z.infer<typeof agentModelSwitchSchema>;
+export type AgentModelSwitchMapping = z.infer<typeof agentModelSwitchMappingSchema>;
+
+export const agentModelSwitchPresetCreateSchema = z.object({
+  /** Display name for the preset (unique per company). */
+  name: z.string().trim().min(1).max(80),
+  /** Restrict the preset to agents using this adapter type. */
+  adapterType: z.string().trim().min(1).max(128).optional(),
+  /** Ordered model mappings, identical in shape to a model-switch body. */
+  mappings: z.array(agentModelSwitchMappingSchema).min(1).max(50),
+  /** Optional env overrides merged into every affected agent's adapterConfig.env. */
+  env: z.record(z.string(), z.string()).optional(),
+}).strict();
+
+export const agentModelSwitchPresetUpdateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80).optional(),
+    adapterType: z.string().trim().min(1).max(128).nullable().optional(),
+    mappings: z.array(agentModelSwitchMappingSchema).min(1).max(50).optional(),
+    env: z.record(z.string(), z.string()).nullable().optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "At least one field must be provided",
+  });
+
+export type AgentModelSwitchPresetCreate = z.infer<typeof agentModelSwitchPresetCreateSchema>;
+export type AgentModelSwitchPresetUpdate = z.infer<typeof agentModelSwitchPresetUpdateSchema>;
+
+export const agentModelSwitchApplySchema = z.object({
+  /** When true, report which agents would change without persisting anything. */
+  dryRun: z.boolean().optional().default(false),
+}).strict();
+
+export type AgentModelSwitchApply = z.infer<typeof agentModelSwitchApplySchema>;
+
 export const updateAgentPermissionsSchema = z.object({
   canCreateAgents: z.boolean(),
   canCreateSkills: z.boolean().optional(),
