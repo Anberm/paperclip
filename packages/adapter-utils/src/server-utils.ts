@@ -63,6 +63,14 @@ interface SpawnTarget {
   cwd?: string;
   env?: Record<string, string | undefined>;
   cleanup?: () => Promise<void>;
+  /**
+   * When true, pass `windowsVerbatimArguments` to `child_process.spawn` so a
+   * pre-quoted command line reaches cmd.exe exactly as built. Required on
+   * Windows for .cmd/.bat wrappers whose path contains spaces: Node's default
+   * arg re-quoting otherwise double-wraps the command line and cmd.exe ends up
+   * treating the quoted path as the (nonexistent) program name.
+   */
+  windowsVerbatimArguments?: boolean;
 }
 
 type RemoteExecutionSpec = SshRemoteExecutionSpec;
@@ -2496,7 +2504,12 @@ async function resolveSpawnTarget(
     const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
     return {
       command: shell,
-      args: ["/d", "/s", "/c", commandLine],
+      // cmd.exe with /s strips the outer quotes, so the whole command line must
+      // carry an extra pair of quotes around it. Without `windowsVerbatimArguments`
+      // Node re-quotes the arg (it contains spaces), double-wrapping the path and
+      // making cmd.exe treat `"C:\...\prog.cmd"` as the program name.
+      args: ["/d", "/s", "/c", `"${commandLine}"`],
+      windowsVerbatimArguments: true,
     };
   }
 
@@ -3345,6 +3358,7 @@ export async function runChildProcess(
           detached: process.platform !== "win32",
           shell: false,
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+          ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();
         const processGroupId = resolveProcessGroupId(child);
