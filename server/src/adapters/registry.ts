@@ -127,6 +127,19 @@ import {
   agentConfigurationDoc as piAgentConfigurationDoc,
   modelProfiles as piModelProfiles,
 } from "@paperclipai/adapter-pi-local";
+import {
+  execute as commandCodeExecute,
+  listCommandCodeSkills,
+  syncCommandCodeSkills,
+  testEnvironment as commandCodeTestEnvironment,
+  sessionCodec as commandCodeSessionCodec,
+  listCommandCodeModels,
+} from "@paperclipai/adapter-commandcode-local/server";
+import {
+  agentConfigurationDoc as commandCodeAgentConfigurationDoc,
+  models as commandCodeModels,
+  modelProfiles as commandCodeModelProfiles,
+} from "@paperclipai/adapter-commandcode-local";
 import { BUILTIN_ADAPTER_TYPES } from "./builtin-adapter-types.js";
 import { buildExternalAdapters } from "./plugin-loader.js";
 import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
@@ -466,6 +479,25 @@ const piLocalAdapter: ServerAdapterModule = {
   agentConfigurationDoc: piAgentConfigurationDoc,
 };
 
+const commandCodeLocalAdapter: ServerAdapterModule = {
+  type: "commandcode_local",
+  execute: commandCodeExecute,
+  testEnvironment: commandCodeTestEnvironment,
+  listSkills: listCommandCodeSkills,
+  syncSkills: syncCommandCodeSkills,
+  sessionCodec: commandCodeSessionCodec,
+  models: commandCodeModels,
+  modelProfiles: commandCodeModelProfiles,
+  sessionManagement: getAdapterSessionManagement("commandcode_local") ?? undefined,
+  listModels: listCommandCodeModels,
+  supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: true,
+  getRuntimeCommandSpec: (config) => buildNpmRuntimeCommandSpec(config, "cmd", "command-code"),
+  agentConfigurationDoc: commandCodeAgentConfigurationDoc,
+};
+
 const adaptersByType = new Map<string, ServerAdapterModule>();
 
 // For builtin types that are overridden by an external adapter, we keep the
@@ -482,6 +514,7 @@ function registerBuiltInAdapters() {
     acpxLocalAdapter,
     claudeLocalAdapter,
     codexLocalAdapter,
+    commandCodeLocalAdapter,
     openCodeLocalAdapter,
     piLocalAdapter,
     cursorCloudAdapter,

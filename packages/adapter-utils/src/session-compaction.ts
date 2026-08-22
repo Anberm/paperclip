@@ -39,6 +39,7 @@ const ADAPTER_MANAGED_SESSION_POLICY: SessionCompactionPolicy = {
 export const LEGACY_SESSIONED_ADAPTER_TYPES = new Set([
   "claude_local",
   "codex_local",
+  "commandcode_local",
   "cursor_cloud",
   "cursor",
   "gemini_local",
@@ -77,6 +78,11 @@ export const ADAPTER_SESSION_MANAGEMENT: Record<string, AdapterSessionManagement
     supportsSessionResume: true,
     nativeContextManagement: "unknown",
     defaultSessionCompaction: DEFAULT_SESSION_COMPACTION_POLICY,
+  },
+  commandcode_local: {
+    supportsSessionResume: true,
+    nativeContextManagement: "likely",
+    defaultSessionCompaction: ADAPTER_MANAGED_SESSION_POLICY,
   },
   pi_local: {
     supportsSessionResume: true,

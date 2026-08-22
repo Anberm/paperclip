@@ -51,6 +51,7 @@ diagnostics/
 .paperclip-runtime/
 /.idea/
 /.agents/
+.commandcode/
 
 # Doc maintenance cursor
 .doc-review-cursor
